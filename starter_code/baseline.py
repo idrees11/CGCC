@@ -1,370 +1,219 @@
 import os
-import pickle
-import numpy as np
-import pandas as pd
-import networkx as nx
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pandas as pd
+import pickle
+import numpy as np
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score, accuracy_score
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GCNConv, global_mean_pool
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", DEVICE)
 
-DATA_DIR = os.path.join("gnn_challenge", "data")
+# --------------------------------------------------
+# PATH SETUP (robust)
+# --------------------------------------------------
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+DATA_DIR = os.path.join(BASE_DIR, "gnn_challenge", "data")
 TRAIN_DIR = os.path.join(DATA_DIR, "train")
 TEST_DIR = os.path.join(DATA_DIR, "test")
 TRAIN_LABELS_CSV = os.path.join(DATA_DIR, "train_labels.csv")
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-SEED = 42
+# --------------------------------------------------
+# GRAPH LOADER
+# --------------------------------------------------
 
+def load_graph(path):
 
-def set_seed(seed: int):
-    import random, os
-    random.seed(seed)
-    np.random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    with open(path, "rb") as f:
+        g = pickle.load(f)
 
+    edge_index = torch.tensor(g["edge_index"], dtype=torch.long)
 
-set_seed(SEED)
-print("Device:", DEVICE)
+    x = torch.tensor(g["node_feat"], dtype=torch.float)
 
+    # add degree feature (improves performance)
+    deg = torch.bincount(edge_index[0], minlength=x.shape[0]).float().unsqueeze(1)
 
-def build_node_features(G: nx.Graph):
-    nodes = list(G.nodes())
-    if len(nodes) == 0:
-        return None
+    x = torch.cat([x, deg], dim=1)
 
-    xs = np.array([G.nodes[n].get("x", 0.0) for n in nodes], dtype=np.float32)
-    ys = np.array([G.nodes[n].get("y", 0.0) for n in nodes], dtype=np.float32)
+    return Data(x=x, edge_index=edge_index)
 
-    xs = xs - xs.mean()
-    ys = ys - ys.mean()
+# --------------------------------------------------
+# LOAD TRAIN DATA
+# --------------------------------------------------
 
-    scale = float(np.sqrt(xs.var() + ys.var()) + 1e-6)
-    xs = xs / scale
-    ys = ys / scale
+def load_train_data():
 
-    deg = np.array([G.degree(n) for n in nodes], dtype=np.float32)
-    deg = (deg - deg.mean()) / (deg.std() + 1e-6)
-
-    return np.stack([xs, ys, deg], axis=1)
-
-
-def coalesce_undirected_edges(G: nx.Graph, mapping: dict):
-    edges = []
-    for u, v in G.edges():
-        if u in mapping and v in mapping:
-            iu, iv = mapping[u], mapping[v]
-            edges.append((iu, iv))
-            edges.append((iv, iu))
-    return edges
-
-
-def normalize_adj_sparse(indices, values, n):
-    indices = indices.long()
-    values = values.float()
-
-    row = indices[0]
-    deg = torch.zeros(n, device=values.device).scatter_add_(0, row, values)
-    deg_inv_sqrt = torch.pow(deg.clamp(min=1.0), -0.5)
-
-    col = indices[1]
-    norm_values = values * deg_inv_sqrt[row] * deg_inv_sqrt[col]
-
-    return torch.sparse_coo_tensor(indices, norm_values, (n, n)).coalesce()
-
-
-def graph_to_tensors(G, device):
-    nodes = list(G.nodes())
-    if len(nodes) == 0:
-        return None, None
-
-    mapping = {node: i for i, node in enumerate(nodes)}
-    n = len(nodes)
-
-    X_np = build_node_features(G)
-    if X_np is None:
-        return None, None
-
-    X = torch.tensor(X_np, dtype=torch.float32, device=device)
-
-    edges = coalesce_undirected_edges(G, mapping)
-    edges += [(i, i) for i in range(n)]
-
-    if len(edges) == 0:
-        return None, None
-
-    indices = torch.tensor(edges, dtype=torch.long, device=device).t()
-    values = torch.ones(indices.shape[1], dtype=torch.float32, device=device)
-
-    adj = torch.sparse_coo_tensor(indices, values, (n, n)).coalesce()
-    A_norm = normalize_adj_sparse(adj.indices(), adj.values(), n)
-
-    return X, A_norm
-
-
-def load_train_data(train_dir, labels_csv, device):
-
-    labels_df = pd.read_csv(labels_csv)
-    label_map = dict(zip(labels_df["filename"], labels_df["target"]))
-
-    files = sorted([f for f in os.listdir(train_dir) if f.endswith(".pkl")])
-
-    graphs, y = [], []
-
-    for fn in files:
-
-        if fn not in label_map:
-            continue
-
-        with open(os.path.join(train_dir, fn), "rb") as f:
-            G = pickle.load(f)
-
-        X, A = graph_to_tensors(G, device)
-
-        if X is None:
-            continue
-
-        graphs.append((fn, X, A))
-        y.append(int(label_map[fn]))
-
-    return graphs, torch.tensor(y, dtype=torch.long, device=device)
-
-
-def load_test_data(test_dir, device):
-
-    files = sorted([f for f in os.listdir(test_dir) if f.endswith(".pkl")])
+    labels_df = pd.read_csv(TRAIN_LABELS_CSV)
 
     graphs = []
+    labels = []
 
-    for fn in files:
+    for _, row in labels_df.iterrows():
 
-        with open(os.path.join(test_dir, fn), "rb") as f:
-            G = pickle.load(f)
+        graph_path = os.path.join(TRAIN_DIR, row["graph_id"] + ".pkl")
 
-        X, A = graph_to_tensors(G, device)
+        g = load_graph(graph_path)
 
-        if X is None:
-            continue
+        graphs.append(g)
+        labels.append(row["label"])
 
-        graphs.append((fn, X, A))
+    y = torch.tensor(labels)
 
-    return graphs
+    return graphs, y
 
+# --------------------------------------------------
+# LOAD TEST DATA
+# --------------------------------------------------
 
-train_graphs, y_all = load_train_data(TRAIN_DIR, TRAIN_LABELS_CSV, DEVICE)
-test_graphs = load_test_data(TEST_DIR, DEVICE)
+def load_test_data():
 
-print("Loaded train graphs:", len(train_graphs))
-print("Loaded test graphs:", len(test_graphs))
+    graphs = []
+    graph_ids = []
 
+    for file in os.listdir(TEST_DIR):
 
-labels_cpu = y_all.detach().cpu().numpy().tolist()
+        if file.endswith(".pkl"):
 
-idx_all = list(range(len(labels_cpu)))
+            path = os.path.join(TEST_DIR, file)
 
-idx_tr, idx_val = train_test_split(
-    idx_all,
-    test_size=0.20,
-    stratify=labels_cpu,
-    random_state=SEED
-)
+            g = load_graph(path)
 
-print("Train:", len(idx_tr), "Val:", len(idx_val))
+            graphs.append(g)
+            graph_ids.append(file.replace(".pkl",""))
 
+    return graphs, graph_ids
 
-counts = np.bincount(np.array(labels_cpu), minlength=3)
+# --------------------------------------------------
+# MODEL
+# --------------------------------------------------
 
-weights = (counts.sum() / (counts + 1e-6))
-weights = weights / weights.mean()
+class SimpleGCN(nn.Module):
 
-class_weights = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
-
-
-class SimpleBetterGCN(nn.Module):
-
-    def __init__(self, in_dim=3, hidden=64, num_classes=3):
+    def __init__(self, in_channels, hidden=64):
         super().__init__()
 
-        self.fc1 = nn.Linear(in_dim, hidden)
-        self.fc2 = nn.Linear(hidden, hidden)
+        self.conv1 = GCNConv(in_channels, hidden)
+        self.conv2 = GCNConv(hidden, hidden)
+        self.conv3 = GCNConv(hidden, hidden)
 
-        self.att = nn.Linear(hidden, 1)
+        self.lin = nn.Linear(hidden, 2)
 
-        self.cls = nn.Linear(hidden, num_classes)
+        self.dropout = 0.3
 
-    def forward(self, x, adj):
+    def forward(self, x, edge_index, batch):
 
-        h1 = torch.spmm(adj, self.fc1(x))
-        h1 = F.relu(h1)
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
 
-        h2 = torch.spmm(adj, self.fc2(h1))
-        h2 = F.relu(h2)
+        x = self.conv2(x, edge_index)
+        x = F.relu(x)
 
-        h = h1 + h2
+        x = self.conv3(x, edge_index)
+        x = F.relu(x)
 
-        weights = torch.softmax(self.att(h), dim=0)
+        x = global_mean_pool(x, batch)
 
-        g = torch.sum(weights * h, dim=0)
+        x = F.dropout(x, p=self.dropout, training=self.training)
 
-        return self.cls(g)
+        x = self.lin(x)
 
+        return x
 
-model = SimpleBetterGCN().to(DEVICE)
+# --------------------------------------------------
+# TRAIN
+# --------------------------------------------------
 
-optimizer = torch.optim.AdamW(
-    model.parameters(),
-    lr=0.003,
-    weight_decay=1e-4
-)
-
-criterion = nn.CrossEntropyLoss(weight=class_weights)
-
-
-def eval_split(indices):
-
-    model.eval()
-
-    y_true, y_pred = [], []
-    total_loss = 0.0
-
-    with torch.no_grad():
-
-        for j in indices:
-
-            _, X, A = train_graphs[j]
-
-            logits = model(X, A).unsqueeze(0)
-
-            target = y_all[j].unsqueeze(0)
-
-            loss = criterion(logits, target)
-
-            total_loss += float(loss.item())
-
-            pred = int(torch.argmax(logits, dim=1).item())
-
-            y_true.append(int(target.item()))
-            y_pred.append(pred)
-
-    acc = accuracy_score(y_true, y_pred)
-
-    f1 = f1_score(y_true, y_pred, average="macro")
-
-    return total_loss / max(1, len(indices)), acc, f1
-
-
-best_f1 = -1.0
-best_state = None
-
-patience = 20
-bad = 0
-
-max_epochs = 400
-
-print("\nTraining...")
-
-for epoch in range(1, max_epochs + 1):
+def train(model, loader, optimizer):
 
     model.train()
 
-    total_loss = 0.0
+    total_loss = 0
 
-    perm = np.random.permutation(idx_tr)
+    for batch in loader:
 
-    for j in perm:
-
-        _, X, A = train_graphs[j]
-
-        target = y_all[j].unsqueeze(0)
+        batch = batch.to(DEVICE)
 
         optimizer.zero_grad()
 
-        logits = model(X, A).unsqueeze(0)
+        out = model(batch.x, batch.edge_index, batch.batch)
 
-        loss = criterion(logits, target)
+        loss = F.cross_entropy(out, batch.y)
 
         loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
-
         optimizer.step()
 
-        total_loss += float(loss.item())
+        total_loss += loss.item()
 
-    if epoch % 10 == 0:
+    return total_loss / len(loader)
 
-        val_loss, val_acc, val_f1 = eval_split(idx_val)
+# --------------------------------------------------
+# MAIN
+# --------------------------------------------------
 
-        print(
-            f"Epoch {epoch:03d} | "
-            f"train_loss={total_loss/len(idx_tr):.4f} | "
-            f"val_loss={val_loss:.4f} | "
-            f"val_acc={val_acc:.3f} | "
-            f"val_f1={val_f1:.3f}"
-        )
+if __name__ == "__main__":
 
-        if val_f1 > best_f1:
+    print("Loading training data...")
 
-            best_f1 = val_f1
+    train_graphs, y = load_train_data()
 
-            best_state = {
-                k: v.detach().cpu().clone()
-                for k, v in model.state_dict().items()
-            }
+    for i, g in enumerate(train_graphs):
+        g.y = torch.tensor([y[i]])
 
-            bad = 0
+    loader = DataLoader(train_graphs, batch_size=32, shuffle=True)
 
-        else:
+    in_channels = train_graphs[0].x.shape[1]
 
-            bad += 1
+    model = SimpleGCN(in_channels).to(DEVICE)
 
-            if bad >= patience:
-                break
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
+    print("Training...")
 
-if best_state is not None:
-    model.load_state_dict(best_state)
+    for epoch in range(30):
 
+        loss = train(model, loader, optimizer)
 
-val_loss, val_acc, val_f1 = eval_split(idx_val)
+        print(f"Epoch {epoch+1} | Loss {loss:.4f}")
 
-print("\nBest validation performance")
-print("Accuracy:", val_acc)
-print("Macro F1:", val_f1)
+    # --------------------------------------------------
+    # PREDICT
+    # --------------------------------------------------
 
+    print("Loading test data...")
 
-model.eval()
+    test_graphs, graph_ids = load_test_data()
 
-pred_rows = []
+    test_loader = DataLoader(test_graphs, batch_size=32)
 
-with torch.no_grad():
+    model.eval()
 
-    for fn, X, A in test_graphs:
+    preds = []
 
-        logits = model(X, A).unsqueeze(0)
+    with torch.no_grad():
 
-        pred = int(torch.argmax(logits, dim=1).item())
+        for batch in test_loader:
 
-        pred_rows.append({
-            "filename": fn,
-            "prediction": pred
-        })
+            batch = batch.to(DEVICE)
 
+            out = model(batch.x, batch.edge_index, batch.batch)
 
-submission = pd.DataFrame(pred_rows).sort_values("filename")
+            p = out.argmax(dim=1).cpu().numpy()
 
-out_path = os.path.join(DATA_DIR, "submission.csv")
+            preds.extend(p)
 
-submission.to_csv(out_path, index=False)
+    submission = pd.DataFrame({
+        "graph_id": graph_ids,
+        "label": preds
+    })
 
-print("\nSubmission saved to:", out_path)
+    submission.to_csv("submission.csv", index=False)
 
-print(submission.head())
+    print("Submission file saved!")
