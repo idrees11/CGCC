@@ -4,7 +4,7 @@
 # City Graph class challenge (CGCC)
 
 
-🏆 View Live Leaderboard: [Open leaderboard](https://murad-hossen.github.io/CGCC/leaderboard/)
+🏆 View Live Leaderboard: [Open leaderboard](https://github.com/idrees11/CGCC/tree/main/leaderboard/)
 
 This dataset comprises street network graphs for 120 diverse cities across continents including North America, South America, Europe, Asia, Africa, Australia & Oceania, and others like the Middle East and Central Asia. The graphs are extracted from OpenStreetMap using OSMnx, focusing on driveable roads within a 500-meter buffer around each city's central point.
 
@@ -289,4 +289,5 @@ print(f"Adjacency Shape: {A.shape}") # (N, N)
 print(f"Feature Shape:   {X.shape}") # (N, 2)
 =======
 >>>>>>> 1a0d3b2645b127c72b75e9723caae2a03d1e9f55
+
 
