@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GNN Challenge - Leaderboard</title>
+    <title>GTA Challenge - Leaderboard</title>
     <link rel="stylesheet" href="leaderboard.css">
 </head>
 <body>
@@ -11,8 +11,8 @@
     
     <div class="container">
         <div class="header">
-            <h1>🏆 CGCC Leaderboard</h1>
-            <p>Classifying city street network layouts (organic, grid, or hybrid) using GNN</p>
+            <h1>🏆 GTA Challenge Leaderboard</h1>
+            <p>Classifying graph topologies using GNN</p>
         </div>
         <p class="last-updated" id="last-updated">Loading...</p>
         
@@ -22,6 +22,9 @@
                     <tr>
                         <th class="rank">Rank</th>
                         <th>Team</th>
+                        <th>F1 (Ideal)</th>
+                        <th>F1 (Perturbed)</th>
+                        <th>Robustness Gap</th>
                     </tr>
                 </thead>
                 <tbody id="table-body">
@@ -35,7 +38,7 @@
         <div class="footer">
             <p>Submit your solution via Pull Request to appear on the leaderboard!</p>
             <p style="margin-top: 10px; font-size: 0.95em;">
-                <a href="https://github.com/Murad-Hossen/CGCC"  
+                <a href="https://github.com/idrees11/GTA-Graph-Topology-Ablation_-GTA-"  
                    target="_blank" 
                    rel="noopener noreferrer">
                     🔗 View Repository on GitHub
@@ -44,7 +47,6 @@
         </div>
     </div>
     
-    <script src="leaderboard.js?v=1"></script>
+    <script src="leaderboard.js"></script>
 </body>
 </html>
-
